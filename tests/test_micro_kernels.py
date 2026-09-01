@@ -28,12 +28,14 @@ def main():
         assert hasattr(radiance_mxfp4_fp8, "launch"), "radiance_mxfp4_fp8 missing launch entrypoint"
 
         M, K, N = 16, 5120, 17408
-        act = torch.randn(M, K, device="cuda", dtype=torch.float8_e4m3fnuz)
+        act = torch.randn(M, K, device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fnuz)
+        act_s = torch.ones(M, device="cuda", dtype=torch.float32)
         w_fp4 = torch.randint(0, 255, (N, K // 2), device="cuda", dtype=torch.uint8)
-        w_scale = torch.randn(N, K // 32, device="cuda", dtype=torch.float8_e8m0fnu)
+        w_scale = torch.randint(0, 255, (K // 32, N), device="cuda", dtype=torch.uint8).view(torch.float8_e8m0fnu)
         out = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
 
-        radiance_mxfp4_fp8.launch(act, w_fp4, w_scale, out, M, N, K)
+        stream = torch.cuda.current_stream().cuda_stream
+        radiance_mxfp4_fp8.launch(act.data_ptr(), w_fp4.data_ptr(), w_scale.data_ptr(), 0, act_s.data_ptr(), out.data_ptr(), M, N, K, stream)
         torch.cuda.synchronize()
         assert not torch.isnan(out).any(), "W4A8 GEMM produced NaN"
         print("W4A8 fp8-WMMA execution verified: shape (16, 17408) OK.")
