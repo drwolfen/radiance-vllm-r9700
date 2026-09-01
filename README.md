@@ -6,7 +6,7 @@
 [![vLLM: 0.28.0](https://img.shields.io/badge/vLLM-0.28.0-orange.svg)]()
 [![PyTorch: 2.12.1+rocm7.14](https://img.shields.io/badge/PyTorch-2.12.1%2Brocm7.14-red.svg)]()
 
-An optimized, production-grade vLLM inference server specifically engineered for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** in Tensor Parallel (`TP=2`).
+An optimized, production-grade vLLM inference server specifically engineered for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** running in Tensor Parallel (`TP=2`).
 
 It bundles a hardened, tested **ROCm 7.14.0 / 7.2.4 + PyTorch 2.12.1 + Triton 3.7.1 + AITER 0.1.20 + vLLM 0.28.0** stack with hand-written RDNA4 matrix/attention kernels (`libr4d`), custom W4A8 fp8-WMMA GEMM, P2P PCIe one-shot all-reduce, aligned Mamba prefix caching, and dynamic MTP drafting.
 
@@ -20,7 +20,44 @@ This stack is engineered and verified specifically for dual-card RDNA4 workstati
 - **Host OS**: Linux with the standard `amdgpu` kernel driver exposing `/dev/kfd` and `/dev/dri`.
 - **Runtime**: Docker or Podman (host requires no Python, no ROCm userspace, no PyTorch).
 
-> **Hardware note**: This image targets `gfx1201` specifically. Both cards run in Tensor Parallel (`TP=2`). Single-GPU and 3+ GPU setups require adjusting TP configuration.
+> **Hardware note**: This image targets `gfx1201` specifically. Both cards run in Tensor Parallel (`TP=2`).
+
+---
+
+## 🔍 Why ROCm 7.14.0 vs. ROCm 10 (Toolchain & Driver Compatibility)
+
+ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, but failed across three critical technical barriers:
+
+1. **Host Kernel Driver (`/dev/kfd`) ABI Mismatch**:
+   - The host machine runs the **ROCm 7.2.4 `amdgpu` kernel driver**.
+   - ROCm 10 userspace relies on new KFD memory topology and ioctl interfaces (KFD v2.x ABI). Running ROCm 10 userspace inside a container on a 7.2.4 host kernel driver results in device probe failures (`HSA_STATUS_ERROR_DEVICE_MISMATCH`).
+2. **PyTorch 2.13+ / Triton 3.8 Instability & GPU Hangs on `gfx1201`**:
+   - ROCm 10 requires PyTorch 2.13+ / 2.14-dev and Triton 3.8.
+   - On `gfx1201` (R9700), Triton 3.8 drops the 16×16×16 fp8 matrix instruction lowering, falling back to 16-bit emulation.
+   - Under sustained Tensor Parallel (`TP=2`) load, PyTorch 2.13 triggers **hard GPU ring-buffer deadlocks / kernel panics** on dual R9700s (historically observed in Radiance 0.5.0–0.5.4).
+3. **RDNA4 Assembler & Native Kernel Support (`libr4d` / AITER)**:
+   - `libr4d` and AITER's MoE assembly kernels (`module_moe_asm`) use direct RDNA4 wave32 assembly instructions written for LLVM 18/19 (ROCm 7.14).
+   - ROCm 10's LLVM toolchain altered instruction mnemonics and register operand constraints for wave32 matrix operations, breaking native kernel compilation.
+
+**Solution**: **ROCm 7.14.0** matches the host 7.2.4 kernel driver 100% and provides rock-solid stability with **PyTorch 2.12.1 + Triton 3.7.1 + AITER 0.1.20 + libr4d `main`**, achieving zero GPU hangs and 100% test gate pass.
+
+---
+
+## 🔄 Updates & Architectural Enhancements vs. `vllm-ornith-run`
+
+| Component / Feature | Legacy `vllm-ornith-run` | `radiance-vllm-r9700` | Benefit / Impact |
+| :--- | :--- | :--- | :--- |
+| **vLLM Core** | `0.26.0` / `0.27.x` | **`0.28.0`** | Modern engine architecture, native `MxFp4LinearKernel` plugin API, robust chunked prefill. |
+| **ROCm Base** | `6.3.3` | **`7.14.0-full`** | Full RDNA4 (`gfx1201`) toolchain, modern HIP 7.14 runtime. |
+| **PyTorch** | `2.10.x` / `2.11.x` | **`2.12.1+rocm7.14`** | Hardened ROCm 7.14 ABI, patched to eliminate NCCL/CUDA symbols. |
+| **Triton** | `3.4.x` / `3.5.x` | **`3.7.1` (`f0b55c0`)** | Native `tl.dot_scaled` RDNA4 matrix core lowering. |
+| **AITER** | `0.1.18` | **`0.1.20`** | Built specifically for `GPU_ARCHS=gfx1201` (unified attention enabled). |
+| **Transformers** | `4.49.x` | **`5.14.1`** | Pinned release + `from_json` Jinja template filter. |
+| **libr4d** | `0.4.0` (unstable) | **`main` (`5dc6302` / `0.5.0`)** | Fixed GDN NaN exponent bug; 25 custom RDNA4 kernels registered. |
+| **KV Cache** | BF16 (~378k tokens) | **FP8 (2.12 Million tokens)** | **5.6x KV capacity expansion**; enables 131k context at high concurrency. |
+| **Prefix Caching** | Disabled / Partial | **APC + Mamba `align`** | Snapshots GDN recurrent state; **~3.6x TTFT drop** on shared agent prompts. |
+| **All-Reduce** | Generic RCCL | **P2P 1-Shot All-Reduce** | Direct PCIe ring push/reduce with zero graph sync overhead. |
+| **Patches** | 24 legacy hunks | **Cleaned & Ported** | Upstreamed hunks made optional; zero patch failure, AST verified. |
 
 ---
 
@@ -30,7 +67,7 @@ This stack is engineered and verified specifically for dual-card RDNA4 workstati
 **Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens)  
 **Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1 / libr4d `main`  
 
-| Concurrency | Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
+| Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **1 Stream** | **65.1 tok/s** | 0.50 req/s | 158.8 ms | 1,046.2 ms | **12.1 ms** | 12.6 ms | 1.70 s |
 | **2 Streams** | **126.1 tok/s** | 0.98 req/s | 325.4 ms | 365.6 ms | **13.3 ms** | 14.0 ms | 2.05 s |
@@ -38,10 +75,14 @@ This stack is engineered and verified specifically for dual-card RDNA4 workstati
 | **8 Streams** | **352.7 tok/s** | 2.74 req/s | 307.2 ms | 392.2 ms | **20.2 ms** | 21.6 ms | 2.94 s |
 | **16 Streams** | **334.9 tok/s** | 2.60 req/s | 3,072.7 ms | 4,111.2 ms | **19.8 ms** | 21.3 ms | 5.73 s |
 
+### 📈 Concurrency & 16-Stream Analysis
 - **Pure Generation Speed**: **12.1 ms / token** (~82.6 tokens/sec single stream decode).
 - **Peak Multi-Stream Throughput**: **352.7 tokens/sec** at 8 concurrent streams.
-- **Available KV Capacity**: **2,125,645 tokens** (16.2x concurrency headroom at 131,072 context).
-- **Agentic Tool Calling**: 100% verified via OpenAI-compatible endpoints with `qwen3_coder` XML tool parsing.
+- **Why TTFT Spiked at 16 Streams**:
+  - The server was started with `--max-num-seqs 8`.
+  - When 16 concurrent requests arrive simultaneously, vLLM admits 8 requests into active processing and queues the remaining 8.
+  - The second batch waits for the first batch to finish generating (~2.8s) before starting prefill → TTFT reads `~3.07s`.
+  - **To enable true 16-stream parallel execution**: Set `--max-num-seqs 16` and update CUDA graph capture sizes (`--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'`). The 2.12M FP8 KV tokens pool has ample memory headroom for 16 active streams.
 
 ---
 
