@@ -76,6 +76,7 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 
 **Tested Model**: [`ornith-ai/Ornith-1.5-35B-A3B-FP8`](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) (35B MoE, 256 fine-grained experts, 8 active per token, 131,072 native context)  
 **Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens) · `--max-num-seqs 16`  
+**Hardware Power & Voltage Tuning**: Both R9700 GPUs undervolted by **-70 mV** with power limit capped at **235 W** per card  
 **Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1 / libr4d `main`  
 
 > **Model Scope Disclaimer**: Only `Ornith-1.5-35B-A3B-FP8` was benchmarked and verified for this release. Other architectures and quantization formats are experimental.
