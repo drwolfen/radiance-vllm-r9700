@@ -139,11 +139,12 @@ The inference server exposes standard OpenAI-compatible endpoints (`/v1/chat/com
 Deploy Open WebUI with native collapsible reasoning support via Docker:
 
 ```bash
-docker run -d -p 3000:8080 \
+docker run -d \
   --name open-webui \
   --restart unless-stopped \
   --net=host \
   -v open-webui:/app/backend/data \
+  -e PORT=3000 \
   -e OPENAI_API_BASE_URL="http://127.0.0.1:8000/v1" \
   -e OPENAI_API_KEY="EMPTY" \
   ghcr.io/open-webui/open-webui:main
