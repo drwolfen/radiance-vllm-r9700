@@ -10,10 +10,13 @@ that holds this file (the build's `/opt/patches`, or the repo root when run stan
 import ast
 
 
-def apply(path, anchor, new, sentinel, label):
+def apply(path, anchor, new, sentinel, label, optional=False):
     """Idempotent one-shot source patch: replace the unique `anchor` with `new` in `path`. Skips if
-    `sentinel` is already present; a missing file or non-unique anchor is fatal."""
+    `sentinel` is already present; a missing file or non-unique anchor is fatal unless optional=True."""
     if not path.exists():
+        if optional:
+            print(f"  SKIP  {label}: {path} does not exist (optional)")
+            return
         raise SystemExit(f"  FAIL  {label}: {path} missing")
     s = path.read_text()
     if sentinel in s:
@@ -21,6 +24,9 @@ def apply(path, anchor, new, sentinel, label):
         return
     n = s.count(anchor)
     if n != 1:
+        if optional:
+            print(f"  UPSTREAM {label}: anchor not found (assumed upstream merged)")
+            return
         raise SystemExit(f"  FAIL  {label}: anchor matched {n}x, expected 1 ({path})")
     s = s.replace(anchor, new, 1)
     ast.parse(s)  # never write a file that would not parse
