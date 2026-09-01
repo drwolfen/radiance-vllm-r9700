@@ -5,6 +5,7 @@
 [![ROCm: 7.14.0 / 7.2.4](https://img.shields.io/badge/ROCm-7.14.0%20%2F%207.2.4-blue.svg)]()
 [![vLLM: 0.28.0](https://img.shields.io/badge/vLLM-0.28.0-orange.svg)]()
 [![PyTorch: 2.12.1+rocm7.14](https://img.shields.io/badge/PyTorch-2.12.1%2Brocm7.14-red.svg)]()
+[![Release: v0.10.0](https://img.shields.io/badge/Release-v0.10.0-green.svg)](https://github.com/drwolfen/radiance-vllm-r9700/releases/tag/v0.10.0)
 
 An optimized, production-grade vLLM inference server specifically engineered for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** running in Tensor Parallel (`TP=2`).
 
@@ -34,6 +35,97 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on iommu=pt numa_balancing=
 - **Resizable BAR (ReBAR / Smart Access Memory)**: `Enabled`
 - **PCIe Link Speed**: `Gen5 / Auto`
 - **IOMMU**: `Enabled` (Passthrough mode via `iommu=pt`)
+
+---
+
+## 🚀 Step-by-Step Quickstart Guide
+
+Getting the production inference server up and running requires three straightforward steps:
+
+### Step 1: Obtain the Container Image
+
+#### Option A: Pull Prebuilt Release Image (Fastest)
+```bash
+docker pull ghcr.io/drwolfen/radiance-vllm:0.10.0
+docker tag ghcr.io/drwolfen/radiance-vllm:0.10.0 radiance-vllm:0.10.0
+```
+
+#### Option B: Build from Source (~45–60 min)
+```bash
+git clone https://github.com/drwolfen/radiance-vllm-r9700.git
+cd radiance-vllm-r9700
+
+# Multi-stage build (compiles PyTorch, Triton, AITER, vLLM, and libr4d for gfx1201, then prunes ROCm tree)
+docker build -t radiance-vllm:0.10.0 --build-arg RADIANCE_VERSION=0.10.0 .
+```
+
+---
+
+### Step 2: Download Model Weights
+
+Download the target model from Hugging Face onto your host filesystem:
+
+```bash
+# Install Hugging Face Hub CLI if needed
+pip install -U huggingface_hub
+
+# Download Ornith-1.5-35B-A3B-FP8 (approx. 37 GB)
+huggingface-cli download ornith-ai/Ornith-1.5-35B-A3B-FP8 --local-dir /home/ydj/LLM-Models/Ornith-1.5-35B-A3B-FP8
+```
+
+---
+
+### Step 3: Launch Production Server
+
+Start the container with optimal RDNA4 acceleration, FP8 KV caching, and agentic tool support:
+
+```bash
+docker run -d \
+  --name vllm-radiance \
+  --restart unless-stopped \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  --ipc=host \
+  -p 8000:8000 \
+  -v /home/ydj/LLM-Models/Ornith-1.5-35B-A3B-FP8:/models/ornith:ro \
+  -v ./chat_template_ornith.jinja:/work/chat_template.jinja:ro \
+  -e HIP_VISIBLE_DEVICES=0,1 \
+  -e VLLM_ROCM_USE_AITER=1 \
+  -e VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \
+  -e RADIANCE_USE_R4D=1 \
+  -e RADIANCE_USE_R4D_AR=1 \
+  -e RADIANCE_USE_R4D_AR_QUANT=1 \
+  -e RADIANCE_FUSE_RMS_QUANT=1 \
+  radiance-vllm:0.10.0 \
+  /models/ornith \
+  --served-model-name Ornith-1.5-35B-A3B-FP8 \
+  --tensor-parallel-size 2 \
+  --max-model-len 131072 \
+  --max-num-seqs 16 \
+  --max-num-batched-tokens 4096 \
+  --kv-cache-dtype fp8 \
+  --gpu-memory-utilization 0.95 \
+  --enable-prefix-caching \
+  --mamba-cache-mode align \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser qwen3 \
+  --chat-template /work/chat_template.jinja \
+  --language-model-only \
+  --trust-remote-code \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+#### Test Server Connectivity:
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Ornith-1.5-35B-A3B-FP8",
+    "messages": [{"role": "user", "content": "Write a Python fibonacci generator."}],
+    "max_tokens": 128
+  }'
+```
 
 ---
 
@@ -164,64 +256,6 @@ On dual 32 GiB R9700 cards (64 GiB total pool), memory allocation behaves as fol
    - Per-slot confidence gate with verbatim n-gram tails that optimizes speculative draft depth on the fly.
 6. **FP8 KV Cache Pool**:
    - 2.12M tokens KV capacity across dual cards, halving memory footprint without quality degradation.
-
----
-
-## 🚀 Quickstart
-
-### 1. Build Container from Source
-```bash
-git clone https://github.com/drwolfen/radiance-vllm-r9700.git
-cd radiance-vllm-r9700
-
-# Build release image (~3.66 GiB pruned)
-docker build -t radiance-vllm:0.10.0 --build-arg RADIANCE_VERSION=0.10.0 .
-```
-
-### 2. Launch Production Server (Docker)
-```bash
-docker run -d \
-  --name vllm-radiance \
-  --restart unless-stopped \
-  --device=/dev/kfd --device=/dev/dri --group-add video \
-  --ipc=host \
-  -p 8000:8000 \
-  -v /path/to/Ornith-1.5-35B-A3B-FP8:/models/ornith:ro \
-  -v ./chat_template_ornith.jinja:/work/chat_template.jinja:ro \
-  -e HIP_VISIBLE_DEVICES=0,1 \
-  -e VLLM_ROCM_USE_AITER=1 \
-  -e VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \
-  -e RADIANCE_USE_R4D=1 \
-  -e RADIANCE_USE_R4D_AR=1 \
-  -e RADIANCE_USE_R4D_AR_QUANT=1 \
-  -e RADIANCE_FUSE_RMS_QUANT=1 \
-  radiance-vllm:0.10.0 \
-  /models/ornith \
-  --served-model-name Ornith-1.5-35B-A3B-FP8 \
-  --tensor-parallel-size 2 \
-  --max-model-len 131072 \
-  --max-num-seqs 16 \
-  --max-num-batched-tokens 4096 \
-  --kv-cache-dtype fp8 \
-  --gpu-memory-utilization 0.95 \
-  --enable-prefix-caching \
-  --mamba-cache-mode align \
-  --enable-auto-tool-choice \
-  --tool-call-parser qwen3_coder \
-  --reasoning-parser qwen3 \
-  --chat-template /work/chat_template.jinja \
-  --language-model-only \
-  --trust-remote-code \
-  --host 0.0.0.0 \
-  --port 8000
-```
-
-### 3. Launch via Docker Compose
-```bash
-# Uses docker-compose.yml with environment overrides
-MODELS=/path/to/models docker compose up -d
-docker compose logs -f
-```
 
 ---
 
