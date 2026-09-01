@@ -29,6 +29,26 @@ def main():
         '_env = _os.environ.get("RADIANCE_GFX_ARCH")',
         "honor RADIANCE_GFX_ARCH env",
     )
+    # A0.1. _sync_hip_cuda_env_vars: only warn if CUDA_VISIBLE_DEVICES is set WITHOUT HIP_VISIBLE_DEVICES
+    apply(
+        SP / "vllm/platforms/rocm.py",
+        "    if cuda_val is not None:\n"
+        "        logger.warning_once(\n"
+        '            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "\n'
+        '            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "\n'
+        '            "instead.",\n'
+        '            scope="process",\n'
+        "        )",
+        "    if cuda_val is not None and hip_val is None:\n"
+        "        logger.warning_once(\n"
+        '            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "\n'
+        '            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "\n'
+        '            "instead.",\n'
+        '            scope="process",\n'
+        "        )",
+        "cuda_val is not None and hip_val is None",
+        "suppress spurious CUDA_VISIBLE_DEVICES warning when HIP_VISIBLE_DEVICES is set",
+    )
     # A. AITER enablement: vLLM gates AITER on MI3xx; treat gfx12x as capable too.
     apply(
         SP / "vllm/_aiter_ops.py",
