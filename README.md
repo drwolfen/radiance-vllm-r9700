@@ -27,6 +27,8 @@ For smooth dual-GPU Tensor Parallel performance, PCIe P2P bandwidth, and zero dr
 GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on iommu=pt numa_balancing=disable pcie_aspm=off pci=realloc=off amdgpu.ppfeaturemask=0xffffffff"
 ```
 
+> **Note on `amdgpu.ppfeaturemask=0xffffffff`**: This parameter is **only required if performing manual GPU power/voltage tuning** (e.g. undervolting/overclocking via sysfs/CoreCtrl). Standard stock operation does not require it.
+
 **UEFI / BIOS Settings**:
 - **Above 4G Decoding**: `Enabled`
 - **Resizable BAR (ReBAR / Smart Access Memory)**: `Enabled`
@@ -65,7 +67,7 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 | **AITER** | `0.1.18` | **`0.1.20`** | Built specifically for `GPU_ARCHS=gfx1201` (unified attention enabled). |
 | **Transformers** | `4.49.x` | **`5.14.1`** | Pinned release + `from_json` Jinja template filter. |
 | **libr4d** | `0.4.0` (unstable) | **`main` (`5dc6302` / `0.5.0`)** | Fixed GDN NaN exponent bug; 25 custom RDNA4 kernels registered. |
-| **KV Cache** | BF16 (~378k tokens) | **FP8 (2.12 Million tokens)** | **5.6x KV capacity expansion**; enables 131k context at high concurrency. |
+| **KV Cache** | BF16 (~378k tokens) | **FP8 (2.12 Million tokens)** | **5.6x KV capacity expansion**; enables 131k/262k context at high concurrency. |
 | **Prefix Caching** | Disabled / Partial | **APC + Mamba `align`** | Snapshots GDN recurrent state; **~3.6x TTFT drop** on shared agent prompts. |
 | **All-Reduce** | Generic RCCL | **P2P 1-Shot All-Reduce** | Direct PCIe ring push/reduce with zero graph sync overhead. |
 | **Patches** | 24 legacy hunks | **Cleaned & Ported** | Upstreamed hunks made optional; zero patch failure, AST verified. |
@@ -74,12 +76,13 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 
 ## 📊 Serving Benchmark Results
 
-**Tested Model**: [`ornith-ai/Ornith-1.5-35B-A3B-FP8`](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) (35B MoE, 256 fine-grained experts, 8 active per token, 131,072 native context)  
-**Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens) · `--max-num-seqs 16`  
+**Tested Model**: [`ornith-ai/Ornith-1.5-35B-A3B-FP8`](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) (35B MoE, 256 fine-grained experts, 8 active per token, 262,144 native context)  
 **Hardware Power & Voltage Tuning**: Both R9700 GPUs undervolted by **-70 mV** with power limit capped at **235 W** per card  
 **Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1 / libr4d `main`  
 
 > **Model Scope Disclaimer**: Only `Ornith-1.5-35B-A3B-FP8` was benchmarked and verified for this release. Other architectures and quantization formats are experimental.
+
+### 1. Production 131k Context Configuration (`--max-model-len 131072 --max-num-seqs 16`)
 
 | Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -89,10 +92,37 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 | **8 Streams** | **362.8 tok/s** | 2.81 req/s | **234.6 ms** | 379.0 ms | **20.1 ms** | 21.5 ms | 2.87 s |
 | **16 Streams** | **550.1 tok/s** | 4.26 req/s | **354.5 ms** | 1,156.0 ms | **23.8 ms** | 26.6 ms | 4.11 s |
 
-- **Pure Single-Stream Decode**: **12.0 ms / token** (~83.3 tokens/sec generation speed, 44.7 ms TTFT).
-- **High-Concurrency Scaling**: **550.1 tokens/sec** at 16 concurrent streams with sub-400ms TTFT.
-- **Available KV Capacity**: **2,125,645 tokens** (16.2x concurrency headroom at 131,072 context).
-- **Agentic Tool Calling**: 100% verified via OpenAI-compatible endpoints with `qwen3_coder` XML tool parsing.
+---
+
+### 2. Full 262k Context Configuration (`--max-model-len 262144 --max-num-seqs 8`)
+
+| Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1 Stream** | **69.0 tok/s** | 0.53 req/s | **147.9 ms** | 968.3 ms | **12.1 ms** | 12.6 ms | 1.68 s |
+| **2 Streams** | **119.5 tok/s** | 0.93 req/s | **296.1 ms** | 952.4 ms | **13.3 ms** | 13.9 ms | 2.00 s |
+| **4 Streams** | **195.6 tok/s** | 1.52 req/s | **314.3 ms** | 1,102.3 ms | **15.3 ms** | 16.1 ms | 3.03 s |
+| **8 Streams** | **317.8 tok/s** | 2.46 req/s | **349.6 ms** | 1,094.7 ms | **19.9 ms** | 21.5 ms | 3.59 s |
+| **16 Streams** | **361.0 tok/s** | 2.80 req/s | **3,024.2 ms** | 3,193.8 ms | **20.0 ms** | 21.6 ms | 5.68 s |
+
+---
+
+## 💾 Memory Sizing & OOM Boundary Guide
+
+On dual 32 GiB R9700 cards (64 GiB total pool), memory allocation behaves as follows:
+
+- **Model Weights**: `17.35 GiB` static per GPU.
+- **FP8 KV Cache Allocation**: `11.19 GiB` (`2,125,645 tokens` total capacity).
+- **Peak VRAM Utilization**: `~29.8 GiB / 31.9 GiB` (93.5% ceiling).
+
+### ⚠️ Configurations That Will Trigger Out-Of-Memory (OOM):
+
+1. **BF16 KV Cache at Long Context (`--kv-cache-dtype bfloat16 / auto`)**:
+   - BF16 KV cache doubles memory consumption to `20.48 KiB / token`.
+   - At 262k context, a single stream requires `5.37 GiB` KV memory per card. Adding 17.35 GiB weights means concurrency is strictly capped at **2 streams**; concurrency ≥ 3 will immediately OOM. **FP8 KV cache is required for full context serving.**
+2. **Unchunked Prefill on Massive Prompts (`--max-num-batched-tokens > 8192` without chunking)**:
+   - Full attention forward passes on unchunked 262k token sequences generate intermediate attention matrices ($Q \cdot K^T$) exceeding available transient workspace. Always maintain `--max-num-batched-tokens 4096` with chunked prefill.
+3. **Over-allocating CUDA Graph Ranges (`--compilation-config` sizes > 32)**:
+   - Capturing full graph ladders above batch size 32 consumes >3.5 GiB in static graph buffers. Keep graph capture sizes bounded to `[1, 2, 4, 8, 16, 24, 32]`.
 
 ---
 
