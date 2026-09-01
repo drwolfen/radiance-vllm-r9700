@@ -6,46 +6,31 @@
 [![vLLM: 0.28.0](https://img.shields.io/badge/vLLM-0.28.0-orange.svg)]()
 [![PyTorch: 2.12.1+rocm7.14](https://img.shields.io/badge/PyTorch-2.12.1%2Brocm7.14-red.svg)]()
 
-An optimized, production-grade vLLM inference container specifically engineered and tuned for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** running in Tensor Parallel (`TP=2`).
+An optimized, production-grade vLLM inference server specifically engineered for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** in Tensor Parallel (`TP=2`).
 
-This repository provides full source, Dockerfiles, custom HIP/C++ kernels (`libr4d`), and logic patches for **vLLM 0.28.0**, **PyTorch 2.12.1**, **Triton 3.7.1**, and **AITER 0.1.20**.
+It bundles a hardened, tested **ROCm 7.14.0 / 7.2.4 + PyTorch 2.12.1 + Triton 3.7.1 + AITER 0.1.20 + vLLM 0.28.0** stack with hand-written RDNA4 matrix/attention kernels (`libr4d`), custom W4A8 fp8-WMMA GEMM, P2P PCIe one-shot all-reduce, aligned Mamba prefix caching, and dynamic MTP drafting.
 
 ---
 
-## 🎯 Target Hardware & System Requirements
+## 🎯 Target Hardware & System Architecture
 
-This project is tailored specifically for dual-card RDNA4 workstations/servers:
-- **GPUs**: **2x AMD Radeon AI PRO R9700** (`gfx1201`, 32 GiB VRAM per card, 64 GiB total).
-- **Interconnect**: PCIe Gen5 direct peer-to-peer (P2P enabled, ~28 GB/s bidirectional).
+This stack is engineered and verified specifically for dual-card RDNA4 workstations:
+- **GPUs**: **2x AMD Radeon AI PRO R9700** (`gfx1201`, 32 GiB VRAM per card, 64 GiB total pool).
+- **Interconnect**: Direct PCIe Gen5 peer-to-peer (P2P enabled, ~28 GB/s bidirectional).
 - **Host OS**: Linux with the standard `amdgpu` kernel driver exposing `/dev/kfd` and `/dev/dri`.
 - **Runtime**: Docker or Podman (host requires no Python, no ROCm userspace, no PyTorch).
 
----
-
-## ⚡ Core Architecture & Optimizations
-
-- **P2P One-Shot All-Reduce (`ar_oneshot_2rank_exact`)**:
-  - Direct PCIe P2P push/reduce mechanism bypassing RCCL for decode and prefill communications.
-  - Achieves zero GPU sync overhead in CUDA/HIP graphs.
-- **W4A8 fp8-WMMA GEMM Kernel**:
-  - Hand-written 16×16×16 fp8 matrix core kernel running at **325 TFLOP/s** on `gfx1201`.
-  - Seamlessly integrates with Quark MXFP4 models via `RadianceMxfp4W4A8LinearKernel`.
-- **Fused Gated Delta Net (GDN) Chunk-Scan**:
-  - Accelerated linear attention ($S^T = K \cdot Q^T$) for hybrid architectures (Qwen3.5, Ornith).
-- **Aligned Mamba SSM Prefix Caching**:
-  - Snapshots recurrent state alongside paged attention blocks, enabling Automatic Prefix Caching (APC) on hybrid architectures for ~3.6x TTFT reductions on shared agent system prompts.
-- **FP8 KV Cache Pool**:
-  - Delivers **2.12 Million tokens** of KV cache capacity across both cards with zero degradation.
+> **Hardware note**: This image targets `gfx1201` specifically. Both cards run in Tensor Parallel (`TP=2`). Single-GPU and 3+ GPU setups require adjusting TP configuration.
 
 ---
 
 ## 📊 Serving Benchmark Results
 
-**Model**: `Ornith-1.5-35B-A3B-FP8` (35B MoE, 256 fine-grained experts, 8 active, 131k context)  
-**Configuration**: Dual AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens)  
-**Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1  
+**Model**: `Ornith-1.5-35B-A3B-FP8` (35B MoE, 256 fine-grained experts, 8 active per token, 131k context)  
+**Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens)  
+**Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1 / libr4d `main`  
 
-| Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
+| Concurrency | Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **1 Stream** | **65.1 tok/s** | 0.50 req/s | 158.8 ms | 1,046.2 ms | **12.1 ms** | 12.6 ms | 1.70 s |
 | **2 Streams** | **126.1 tok/s** | 0.98 req/s | 325.4 ms | 365.6 ms | **13.3 ms** | 14.0 ms | 2.05 s |
@@ -53,25 +38,44 @@ This project is tailored specifically for dual-card RDNA4 workstations/servers:
 | **8 Streams** | **352.7 tok/s** | 2.74 req/s | 307.2 ms | 392.2 ms | **20.2 ms** | 21.6 ms | 2.94 s |
 | **16 Streams** | **334.9 tok/s** | 2.60 req/s | 3,072.7 ms | 4,111.2 ms | **19.8 ms** | 21.3 ms | 5.73 s |
 
-- **Pure Generation Speed**: **12.1 ms / token** (~82.6 tokens/sec single stream).
-- **Multi-Stream Scalability**: **352.7 tokens/sec** at 8 concurrent streams.
+- **Pure Generation Speed**: **12.1 ms / token** (~82.6 tokens/sec single stream decode).
+- **Peak Multi-Stream Throughput**: **352.7 tokens/sec** at 8 concurrent streams.
 - **Available KV Capacity**: **2,125,645 tokens** (16.2x concurrency headroom at 131,072 context).
-- **Tool Calling & Agentic Execution**: 100% verified with XML tool calls and reasoning tags.
+- **Agentic Tool Calling**: 100% verified via OpenAI-compatible endpoints with `qwen3_coder` XML tool parsing.
+
+---
+
+## ⚡ Core Features & RDNA4 Accelerators
+
+1. **W4A8 fp8-WMMA Matrix Core Kernel (`radiance_mxfp4_fp8.hip`)**:
+   - Hand-written 16×16×16 fp8 matrix core kernel running at **325 TFLOP/s** on `gfx1201` (vs 160 TFLOP/s for f16 WMMA and 43 TFLOP/s for stock Triton).
+   - Measures 1.6–1.9x faster than tuned AITER paths at prefill shapes.
+2. **P2P One-Shot All-Reduce (`ar_oneshot_2rank_exact`)**:
+   - Direct PCIe P2P push/reduce mechanism replacing RCCL for TP=2 communication.
+   - Zero GPU synchronization overhead in captured CUDA/HIP graphs.
+3. **Fused Gated Delta Net (GDN) Chunk-Scan**:
+   - Hardware-accelerated linear attention ($S^T = K \cdot Q^T$) for hybrid Qwen3.5/Ornith models.
+4. **Aligned Mamba SSM Automatic Prefix Caching (APC)**:
+   - `--enable-prefix-caching --mamba-cache-mode=align` snapshots and restores recurrent GDN state at block boundaries, delivering ~3.6x TTFT drops on shared agent prompts.
+5. **Lossless Dynamic MTP Drafting (`RADIANCE_DYNAMIC_DRAFT=1`)**:
+   - Per-slot confidence gate with verbatim n-gram tails that optimizes speculative draft depth on the fly.
+6. **FP8 KV Cache Pool**:
+   - 2.12M tokens KV capacity across dual cards, halving memory footprint without quality degradation.
 
 ---
 
 ## 🚀 Quickstart
 
-### 1. Clone & Build Container
+### 1. Build Container from Source
 ```bash
 git clone https://github.com/drwolfen/radiance-vllm-r9700.git
 cd radiance-vllm-r9700
 
-# Build release image
+# Build release image (~3.66 GiB pruned)
 docker build -t radiance-vllm:0.10.0 --build-arg RADIANCE_VERSION=0.10.0 .
 ```
 
-### 2. Launch Production Server
+### 2. Launch Production Server (Docker)
 ```bash
 docker run -d \
   --name vllm-radiance \
@@ -109,15 +113,34 @@ docker run -d \
   --port 8000
 ```
 
-### 3. Run Verification Tests & Benchmarks
+### 3. Launch via Docker Compose
 ```bash
-# Run micro-kernel verification (Gate 4)
-python3 tests/test_micro_kernels.py
+# Uses docker-compose.yml with environment overrides
+MODELS=/path/to/models docker compose up -d
+docker compose logs -f
+```
 
-# Run Quark MXFP4 layer selection check
+---
+
+## 🛠️ Verification Gates Architecture
+
+Every build stage is validated through standalone automated test gates:
+
+```bash
+# Gate 1: Test native HIP toolchain on gfx1201
+./tests/test_hip_toolchain.sh
+
+# Gate 2: Test Python wheels & PyTorch 2.12.1 ABI
+python3 tests/test_wheels.py
+
+# Gate 3: Test Python AST syntax across all 2,903 patched modules
+python3 tests/test_patch_ast.py
+
+# Gate 4: Test standalone micro-kernels (libr4d 25 kernels & W4A8 GEMM)
+python3 tests/test_micro_kernels.py
 python3 tests/test_mxfp4_layer.py
 
-# Run extended benchmark suite
+# Gate 5: Run extended serving benchmark suite
 python3 tests/vllm_benchmark_suite.py --url http://localhost:8000/v1/chat/completions
 ```
 
@@ -125,23 +148,23 @@ python3 tests/vllm_benchmark_suite.py --url http://localhost:8000/v1/chat/comple
 
 ## 📖 Log Messages, Notices & Diagnostics Reference
 
-When starting the container or compiling graphs, you may observe specific log lines. Here is the complete reference explaining each message:
+When starting the container or compiling graphs, you will observe specific log lines. Here is the complete reference explaining each message:
 
-### 1. Topology & Startup Banners
+### 1. Hardware Startup Banners
 - `┌─[ RADIANCE · GPU TOPOLOGY & BANDWIDTH ]──`
-  - **Meaning**: Automated hardware startup sweep executing `rocm-bandwidth-test`. Confirms that both R9700 cards have direct P2P access enabled and reports host-to-device and device-to-device PCIe bandwidth (~28 GB/s).
+  - **Meaning**: Automated hardware startup sweep running `rocm-bandwidth-test`. Verifies direct P2P access between both R9700 cards and reports bidirectional PCIe copy bandwidth (~28 GB/s).
 - `[0] AMD Radeon AI PRO R9700 gfx1201 31.9 GiB ✓ gfx1201`
-  - **Meaning**: Hardware arch check passed. Both GPUs successfully enumerated via direct AMDSMI initialization.
+  - **Meaning**: Hardware architecture check passed. Both GPUs enumerated cleanly via direct AMDSMI initialization.
 
 ### 2. Kernel Acceleration Hooks
 - `[radiance] preshuffle weight-shuffle-at-load hook installed`
-  - **Meaning**: Intercepts model load to permute FP8 weights into RDNA4 matrix fragment order in host RAM, avoiding runtime layout transpositions.
+  - **Meaning**: Permutes FP8 weights into RDNA4 matrix fragment order in host RAM during load, eliminating runtime layout transposition overhead.
 - `[radiance] fast-reduce hook armed (RADIANCE_USE_R4D_AR=1, all_reduce wrap)`
   - **Meaning**: Replaces stock RCCL all-reduce with direct PCIe P2P one-shot reduction (`ar_oneshot_2rank_exact`).
 - `[radiance.gdn] gdn_chunk_scan ENABLED (head_k 128, head_v 128, chunk 64)`
   - **Meaning**: Activates fused chunked linear attention kernel for hybrid GDN models (Qwen3.5/Ornith).
 - `[radiance.gemm] claimed N=... K=... M=...`
-  - **Meaning**: Skinny GEMM dispatcher claimed an intermediate matrix shape for execution on native RDNA4 assembly.
+  - **Meaning**: Skinny GEMM dispatcher claimed an intermediate matrix projection for native RDNA4 assembly execution.
 
 ### 3. Compilation & Tuning Notices
 - `[aiter] start build [module_quant] / [module_moe_asm]`
@@ -155,26 +178,45 @@ When starting the container or compiling graphs, you may observe specific log li
 
 ### 4. Deprecations & Benign Notices
 - `UserWarning: tl.make_block_ptr is deprecated.`
-  - **Meaning**: Upstream Triton 3.7 notification recommending `TensorDescriptor`. Handled internally; has no impact on performance or precision.
+  - **Meaning**: Upstream Triton 3.7 notification recommending `TensorDescriptor`. Handled internally; zero impact on performance or precision.
 - `AllReduce fusion pass is disabled.`
   - **Meaning**: AITER's generic CUDA all-reduce fusion pass is skipped in favor of Radiance's native P2P all-reduce kernel.
 
 ---
 
-## 🛠️ Verification Gates Architecture
+## 🔧 Environment Variables & Knobs Reference
 
-Every layer of the container build is validated through automated test scripts:
-- **Gate 1 (`tests/test_hip_toolchain.sh`)**: Direct HIP C++ compilation and kernel execution on `gfx1201`.
-- **Gate 2 (`tests/test_wheels.py`)**: Validates PyTorch 2.12.1+rocm7.14, Triton 3.7.1, AITER 0.1.20, and dual-GPU detection.
-- **Gate 3 (`tests/test_patch_ast.py`)**: AST syntax tree validation of all 2,903 patched Python modules.
-- **Gate 4 (`tests/test_micro_kernels.py`)**: Executes 25 `libr4d` micro-kernels and standalone W4A8 fp8-WMMA GEMM.
-- **Gate 5 (`tests/test_e2e_inference.sh`)**: Live end-to-end inference verification.
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `HIP_VISIBLE_DEVICES` | `0,1` | Explicit HIP device indices for the two R9700 cards. |
+| `VLLM_ROCM_USE_AITER` | `1` | Master switch for AITER accelerated attention kernels. |
+| `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION` | `1` | Enables unified attention on gfx1201. |
+| `RADIANCE_USE_R4D` | `1` | Enables hand-written RDNA4 C++/HIP kernels (`libr4d`). |
+| `RADIANCE_USE_R4D_AR` | `1` | Enables direct PCIe P2P one-shot all-reduce (`ar_oneshot_2rank_exact`). |
+| `RADIANCE_USE_R4D_AR_QUANT` | `1` | Compressed all-reduce payload for large prefill messages. |
+| `RADIANCE_FUSE_RMS_QUANT` | `1` | Fuses group-FP8 quantization into RMSNorm epilogue. |
+| `RADIANCE_DYNAMIC_DRAFT` | `1` | Enables dynamic confidence-gated speculative drafting. |
+| `RADIANCE_FAST_DRAFT` | `1` | Enables 2-bit MTP draft head with exact rerank. |
+| `RADIANCE_MXFP4` | `1` | Relaxes CDNA4 gate for native Quark MXFP4 execution. |
+| `RADIANCE_MXFP4_W4A8` | `1` | Enables hand-written W4A8 fp8-WMMA GEMM kernel (325 TFLOP/s). |
+
+---
+
+## ❓ Troubleshooting
+
+| Symptom | Cause & Solution |
+| :--- | :--- |
+| `port 8000 is already in use` | Another service holds the port or GPUs. Check `docker ps` or stop background service (`systemctl --user stop llama-server.service`). |
+| `/dev/kfd is missing` | The `amdgpu` kernel driver is not loaded on the host. Ensure driver is installed and permissions are set. |
+| `HIP out of memory during warmup` | Lower `--gpu-memory-utilization` (e.g. `0.90`) or reduce `--max-model-len`. |
+| `First request takes several minutes` | Normal on cold start: Torch Inductor compiles Triton graphs. Subsequent starts reuse the persistent compile cache. |
+| `Tool calls outputting raw XML` | Pass `--enable-auto-tool-choice --tool-call-parser qwen3_coder` to parse XML `<tool_call>` blocks into standard API format. |
 
 ---
 
 ## 📜 Acknowledgements & Upstream Attribution
 
-This project is built upon and directly extends the research and engineering of:
+This project is built upon and directly extends the foundational research and engineering of:
 - **`ggz14`**: [`radiance-vllm-mxfp4`](https://codeberg.org/ggz14/radiance-vllm-mxfp4) (Native Quark MXFP4 and RDNA4 tuning).
 - **`StillDeadcode`**: [`vllm-radiance`](https://codeberg.org/StillDeadcode/vllm-radiance) & [`libr4d`](https://codeberg.org/StillDeadcode/libr4d) (RDNA4 C++/HIP kernel library, P2P all-reduce, GDN linear attention).
 
