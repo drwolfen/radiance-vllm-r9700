@@ -71,6 +71,17 @@ LAYER_IMPORT_NEW = (
 # Anchored on the warm-up early return, which is unique to _forward_core (the ROCm entry point
 # passes v_dim instead) and sits after the metadata is resolved.
 LAYER_OLD = (
+    '        """Core conv1d + recurrent attention (standard path).\n'
+    "\n"
+    "        Args:\n"
+    "            mixed_qkv: packed [q, k, v] projection (num_tokens, qkv_dim)\n"
+    "            b: beta gating vector                   (num_tokens, num_heads)\n"
+    "            a: alpha gating vector                  (num_tokens, num_heads)\n"
+    "            core_attn_out: Pre-allocated output buffer for attention results.\n"
+    '        """\n'
+    "        forward_context = get_forward_context()\n"
+    "        attn_metadata_raw = forward_context.attn_metadata\n"
+    "\n"
     "        if attn_metadata_raw is None:\n"
     "            self._warmup_prefill_kernels(mixed_qkv, 0)\n"
     "            return\n"

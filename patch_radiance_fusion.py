@@ -66,7 +66,7 @@ MARKER = "RADIANCE: rms_norm(+fused_add) + group fp8 quant"
 
 
 def main():
-    apply(F, ANCHOR, NEW, MARKER, "rms+quant fusion coverage fix")
+    apply(F, ANCHOR, NEW, MARKER, "rms+quant fusion coverage fix", optional=True)
 
 
 if __name__ == "__main__":
