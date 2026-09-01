@@ -123,7 +123,7 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "Ornith-1.5-35B-A3B-FP8",
     "messages": [{"role": "user", "content": "Write a Python fibonacci generator."}],
-    "max_tokens": 128
+    "max_tokens": 512
   }'
 ```
 
