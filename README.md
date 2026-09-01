@@ -12,15 +12,26 @@ It bundles a hardened, tested **ROCm 7.14.0 / 7.2.4 + PyTorch 2.12.1 + Triton 3.
 
 ---
 
-## 🎯 Target Hardware & System Architecture
+## 🎯 Target Hardware, Host OS & Kernel Parameters
 
 This stack is engineered and verified specifically for dual-card RDNA4 workstations:
 - **GPUs**: **2x AMD Radeon AI PRO R9700** (`gfx1201`, 32 GiB VRAM per card, 64 GiB total pool).
 - **Interconnect**: Direct PCIe Gen5 peer-to-peer (P2P enabled, ~28 GB/s bidirectional).
-- **Host OS**: Linux with the standard `amdgpu` kernel driver exposing `/dev/kfd` and `/dev/dri`.
+- **Host OS**: **Ubuntu 24.04 LTS (`noble`)** with standard `amdgpu` kernel driver exposing `/dev/kfd` and `/dev/dri`.
 - **Runtime**: Docker or Podman (host requires no Python, no ROCm userspace, no PyTorch).
 
-> **Hardware note**: This image targets `gfx1201` specifically. Both cards run in Tensor Parallel (`TP=2`).
+### Recommended Host Kernel Boot Parameters & UEFI Configuration
+For smooth dual-GPU Tensor Parallel performance, PCIe P2P bandwidth, and zero driver timeouts, configure `/etc/default/grub` with:
+
+```text
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on iommu=pt numa_balancing=disable pcie_aspm=off pci=realloc=off amdgpu.ppfeaturemask=0xffffffff"
+```
+
+**UEFI / BIOS Settings**:
+- **Above 4G Decoding**: `Enabled`
+- **Resizable BAR (ReBAR / Smart Access Memory)**: `Enabled`
+- **PCIe Link Speed**: `Gen5 / Auto`
+- **IOMMU**: `Enabled` (Passthrough mode via `iommu=pt`)
 
 ---
 
@@ -63,26 +74,24 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 
 ## 📊 Serving Benchmark Results
 
-**Model**: `Ornith-1.5-35B-A3B-FP8` (35B MoE, 256 fine-grained experts, 8 active per token, 131k context)  
-**Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens)  
+**Tested Model**: [`ornith-ai/Ornith-1.5-35B-A3B-FP8`](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) (35B MoE, 256 fine-grained experts, 8 active per token, 131,072 native context)  
+**Configuration**: 2x AMD Radeon AI PRO R9700 (TP=2) · FP8 KV Cache · Chunked Prefill (4096 tokens) · `--max-num-seqs 16`  
 **Environment**: ROCm 7.14 / vLLM 0.28.0 / PyTorch 2.12.1 / Triton 3.7.1 / libr4d `main`  
+
+> **Model Scope Disclaimer**: Only `Ornith-1.5-35B-A3B-FP8` was benchmarked and verified for this release. Other architectures and quantization formats are experimental.
 
 | Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1 Stream** | **65.1 tok/s** | 0.50 req/s | 158.8 ms | 1,046.2 ms | **12.1 ms** | 12.6 ms | 1.70 s |
-| **2 Streams** | **126.1 tok/s** | 0.98 req/s | 325.4 ms | 365.6 ms | **13.3 ms** | 14.0 ms | 2.05 s |
-| **4 Streams** | **187.4 tok/s** | 1.45 req/s | 366.3 ms | 1,258.7 ms | **15.3 ms** | 16.3 ms | 3.14 s |
-| **8 Streams** | **352.7 tok/s** | 2.74 req/s | 307.2 ms | 392.2 ms | **20.2 ms** | 21.6 ms | 2.94 s |
-| **16 Streams** | **334.9 tok/s** | 2.60 req/s | 3,072.7 ms | 4,111.2 ms | **19.8 ms** | 21.3 ms | 5.73 s |
+| **1 Stream** | **74.8 tok/s** | 0.58 req/s | **44.7 ms** | 855.9 ms | **12.0 ms** | 12.6 ms | 1.58 s |
+| **2 Streams** | **130.7 tok/s** | 1.01 req/s | **219.6 ms** | 309.3 ms | **13.3 ms** | 13.9 ms | 1.99 s |
+| **4 Streams** | **200.1 tok/s** | 1.55 req/s | **293.5 ms** | 1,048.2 ms | **14.9 ms** | 16.0 ms | 2.94 s |
+| **8 Streams** | **362.8 tok/s** | 2.81 req/s | **234.6 ms** | 379.0 ms | **20.1 ms** | 21.5 ms | 2.87 s |
+| **16 Streams** | **550.1 tok/s** | 4.26 req/s | **354.5 ms** | 1,156.0 ms | **23.8 ms** | 26.6 ms | 4.11 s |
 
-### 📈 Concurrency & 16-Stream Analysis
-- **Pure Generation Speed**: **12.1 ms / token** (~82.6 tokens/sec single stream decode).
-- **Peak Multi-Stream Throughput**: **352.7 tokens/sec** at 8 concurrent streams.
-- **Why TTFT Spiked at 16 Streams**:
-  - The server was started with `--max-num-seqs 8`.
-  - When 16 concurrent requests arrive simultaneously, vLLM admits 8 requests into active processing and queues the remaining 8.
-  - The second batch waits for the first batch to finish generating (~2.8s) before starting prefill → TTFT reads `~3.07s`.
-  - **To enable true 16-stream parallel execution**: Set `--max-num-seqs 16` and update CUDA graph capture sizes (`--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'`). The 2.12M FP8 KV tokens pool has ample memory headroom for 16 active streams.
+- **Pure Single-Stream Decode**: **12.0 ms / token** (~83.3 tokens/sec generation speed, 44.7 ms TTFT).
+- **High-Concurrency Scaling**: **550.1 tokens/sec** at 16 concurrent streams with sub-400ms TTFT.
+- **Available KV Capacity**: **2,125,645 tokens** (16.2x concurrency headroom at 131,072 context).
+- **Agentic Tool Calling**: 100% verified via OpenAI-compatible endpoints with `qwen3_coder` XML tool parsing.
 
 ---
 
@@ -138,7 +147,7 @@ docker run -d \
   --served-model-name Ornith-1.5-35B-A3B-FP8 \
   --tensor-parallel-size 2 \
   --max-model-len 131072 \
-  --max-num-seqs 8 \
+  --max-num-seqs 16 \
   --max-num-batched-tokens 4096 \
   --kv-cache-dtype fp8 \
   --gpu-memory-utilization 0.95 \
@@ -252,6 +261,13 @@ When starting the container or compiling graphs, you will observe specific log l
 | `HIP out of memory during warmup` | Lower `--gpu-memory-utilization` (e.g. `0.90`) or reduce `--max-model-len`. |
 | `First request takes several minutes` | Normal on cold start: Torch Inductor compiles Triton graphs. Subsequent starts reuse the persistent compile cache. |
 | `Tool calls outputting raw XML` | Pass `--enable-auto-tool-choice --tool-call-parser qwen3_coder` to parse XML `<tool_call>` blocks into standard API format. |
+
+---
+
+## 🤖 AI Synthesis & Engineering Attribution
+
+- **Implementation Plan**: Designed and synthesized using **Gemini Flash 3.7 (High)** and **GLM-5.2**.
+- **Execution & Automated Porting**: Implemented, built, verified, and benchmarked by **Gemini Flash 3.7 (High)**.
 
 ---
 
