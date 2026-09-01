@@ -57,7 +57,7 @@ RUN git clone --depth 1 -b v${TORCH_VERSION} --recurse-submodules --shallow-subm
     && pip install -r requirements.txt \
     && python tools/amd_build/build_amd.py \
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
-       USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 USE_AOTRITON=0 \
+       USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 USE_AOTRITON=0 USE_SYMMETRIC_MEMORY=0 USE_ROCSHMEM=0 \
        PYTORCH_BUILD_VERSION=${TORCH_VERSION}+rocm7.14 PYTORCH_BUILD_NUMBER=1 \
        python setup.py bdist_wheel \
     && cp dist/*.whl /wheels/ && pip install dist/*.whl && rm -rf /src/pytorch
