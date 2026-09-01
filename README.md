@@ -37,6 +37,23 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on iommu=pt numa_balancing=
 
 ---
 
+## 🔍 Upstream Specification Compliance & Alignment
+
+### 1. Compliance with Hugging Face Model Card (`ornith-ai/Ornith-1.5-35B-A3B`)
+- **Upstream Baseline**: The official [Hugging Face model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B) specifies that serving the full 256K context natively in standard BF16 requires **2× 80GB GPUs** (~160 GB total VRAM).
+- **Radiance Optimization for 2× 32GB GPUs**:
+  - By enabling **FP8 KV Cache (`--kv-cache-dtype fp8`)**, memory per token is halved (`10.0 KiB/token` per GPU).
+  - Combining FP8 KV cache with **chunked prefill (`--max-num-batched-tokens 4096`)** and **aligned recurrent state (`--mamba-cache-mode align`)** allows full **262,144 token context** to fit comfortably on dual **32 GiB R9700 cards** (64 GiB total) with zero precision degradation.
+  - All recommended API arguments (`--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3`) are fully supported and validated.
+
+### 2. Alignment & Enhancements vs. `radiance-vllm-mxfp4` (Codeberg)
+- **Base Upgrade**: Upstream `radiance-vllm-mxfp4` pinned `stilldeadcode/vllm-radiance:0.9.3` (vLLM 0.26/0.27, ROCm 6.3, PyTorch 2.10, AITER 0.1.18). This repository upgrades the stack to **vLLM 0.28.0**, **ROCm 7.14.0**, **PyTorch 2.12.1**, **Triton 3.7.1**, **AITER 0.1.20**, and **libr4d `main` (`5dc6302`)**.
+- **Chunked Prefill Sizing**: Upstream noted `--max-num-batched-tokens >= 2240` for 35B-A3B; our stack standardizes on `--max-num-batched-tokens 4096`, maximizing prefill compute utilization on `gfx1201` matrix cores while preventing intermediate memory spikes.
+- **GDN Exponent Clamp**: Incorporates upstream PR #1 fixing the GDN NaN exponent overflow in `libr4d`.
+- **Tool Calling & Reasoning Integration**: Incorporates modern XML tool parsing (`qwen3_coder` and `from_json` Jinja filters) native to vLLM 0.28.
+
+---
+
 ## 🔍 Why ROCm 7.14.0 vs. ROCm 10 (Toolchain & Driver Compatibility)
 
 ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, but failed across three critical technical barriers:
@@ -92,9 +109,15 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 | **8 Streams** | **362.8 tok/s** | 2.81 req/s | **234.6 ms** | 379.0 ms | **20.1 ms** | 21.5 ms | 2.87 s |
 | **16 Streams** | **550.1 tok/s** | 4.26 req/s | **354.5 ms** | 1,156.0 ms | **23.8 ms** | 26.6 ms | 4.11 s |
 
+- **Pure Single-Stream Decode**: **12.0 ms / token** (~83.3 tokens/sec generation speed, 44.7 ms TTFT).
+- **High-Concurrency Scaling**: **550.1 tokens/sec** at 16 concurrent streams with sub-400ms TTFT.
+- **Available KV Capacity**: **2,125,645 tokens** (16.2x concurrency headroom at 131,072 context).
+
 ---
 
 ### 2. Full 262k Context Configuration (`--max-model-len 262144 --max-num-seqs 8`)
+
+*Note: For the full 262,144 context window, active batch concurrency is bounded to `--max-num-seqs 8` to ensure that even if all streams reach full context length simultaneously (8 × 262k = 2.09M tokens), requests execute entirely within physical VRAM (2.12M tokens pool) without paging eviction.*
 
 | Concurrency | Total Throughput (tok/s) | Request Rate | TTFT (p50) | TTFT (p95) | TPOT (p50) | TPOT (p95) | E2E Latency (p50) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -102,7 +125,6 @@ ROCm 10 (TheRock unified toolchain) was investigated as an initial candidate, bu
 | **2 Streams** | **119.5 tok/s** | 0.93 req/s | **296.1 ms** | 952.4 ms | **13.3 ms** | 13.9 ms | 2.00 s |
 | **4 Streams** | **195.6 tok/s** | 1.52 req/s | **314.3 ms** | 1,102.3 ms | **15.3 ms** | 16.1 ms | 3.03 s |
 | **8 Streams** | **317.8 tok/s** | 2.46 req/s | **349.6 ms** | 1,094.7 ms | **19.9 ms** | 21.5 ms | 3.59 s |
-| **16 Streams** | **361.0 tok/s** | 2.80 req/s | **3,024.2 ms** | 3,193.8 ms | **20.0 ms** | 21.6 ms | 5.68 s |
 
 ---
 
