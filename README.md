@@ -123,8 +123,47 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "Ornith-1.5-35B-A3B-FP8",
     "messages": [{"role": "user", "content": "Write a Python fibonacci generator."}],
-    "max_tokens": 512
+    "max_tokens": 1024
   }'
+```
+
+> **Reasoning Model Note**: `Ornith-1.5-35B-A3B` first generates its internal `<think>...</think>` thought chain (returned in `message.reasoning`) before emitting final output in `message.content`. Because `max_tokens` sets the combined ceiling for both reasoning and content, always specify `max_tokens >= 1024` for full multi-part code generation.
+
+---
+
+### Step 4: Web UI & Client Integrations
+
+The inference server exposes standard OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/docs`).
+
+#### 1. Open WebUI (Recommended ChatGPT-Style Interface)
+Deploy Open WebUI with native collapsible reasoning support via Docker:
+
+```bash
+docker run -d -p 3000:8080 \
+  --name open-webui \
+  --restart unless-stopped \
+  --net=host \
+  -v open-webui:/app/backend/data \
+  -e OPENAI_API_BASE_URL="http://127.0.0.1:8000/v1" \
+  -e OPENAI_API_KEY="EMPTY" \
+  ghcr.io/open-webui/open-webui:main
+```
+Open **`http://<host-ip>:3000`** in your browser, select `Ornith-1.5-35B-A3B-FP8`, and chat.
+
+#### 2. Interactive API Explorer (Swagger Docs)
+Navigate directly to **`http://<host-ip>:8000/docs`** to inspect and test all endpoints interactively in your browser.
+
+#### 3. Desktop Clients (Chatbox, Cherry Studio, NextChat, LibreChat)
+Configure custom OpenAI provider settings:
+- **Base URL / Host**: `http://<host-ip>:8000/v1`
+- **API Key**: `EMPTY` (or any string)
+- **Model Name**: `Ornith-1.5-35B-A3B-FP8`
+
+#### 4. Terminal Coding Agents (Hermes, OpenClaw, OpenCode)
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:8000/v1"
+export OPENAI_API_KEY="EMPTY"
+export MODEL="Ornith-1.5-35B-A3B-FP8"
 ```
 
 ---
