@@ -1,0 +1,16 @@
+# Keep the build context lean -- none of this belongs in the image build.
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.swp
+.DS_Store
+# local deploy state (bind-mounted at runtime, never built in)
+.env
+models/
+vllm-cache/
+# build outputs of the Makefile dev tool: the image compiles its own kernels from the .hip
+# sources, and rocm-bandwidth-test is built in stage 1. A stale local copy must never be
+# mistaken for what the image ships.
+*.so
+rocm-bandwidth-test

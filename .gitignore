@@ -1,0 +1,18 @@
+# python
+__pycache__/
+*.pyc
+# local deploy state (mounted into the container; not source)
+.env
+models/
+vllm-cache/
+# build outputs: the kernel library is cloned and compiled by the image build, and
+# rocm-bandwidth-test is built in the Dockerfile. A stale local copy must never be
+# mistaken for what the image ships.
+*.so
+rocm-bandwidth-test
+# `make r4d` clones the pinned libr4d tag here for local development.
+libr4d/
+
+# editor / os
+*.swp
+.DS_Store

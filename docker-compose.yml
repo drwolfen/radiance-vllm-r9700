@@ -1,0 +1,177 @@
+# Example serve for Qwen3.8-27B-FP8 on dual R9700 (gfx1201), managed by docker compose.
+# Launch from this directory:
+#     docker compose up -d          # start (detached); poll `docker compose logs -f`
+#     docker compose down           # stop + remove
+#     docker compose restart        # restart in place
+#
+# The image ENTRYPOINT is radiance_entrypoint.sh (RADIANCE banner + env prechecks, then
+# `exec vllm serve "$@"`); `command:` below supplies the args.
+# Tunable knobs are ${VAR:-default}: override via the shell or a .env file WITHOUT editing
+# this file, e.g.:  MAX_NUM_SEQS=16 MAX_MODEL_LEN=32768 docker compose up -d
+services:
+  vllm:
+    image: ${IMAGE:-vllm-radiance:0.9.3}
+    container_name: vllm-radiance
+    restart: unless-stopped
+    command:
+      - /models/Qwen/Qwen3.8-27B-FP8
+      - --served-model-name=qwen3.8-27b
+      - --quantization=fp8
+      - --tensor-parallel-size=${TP:-2}
+      # --- defaults: 8 concurrent seqs, 200K ctx/seq ---
+      - --max-num-seqs=${MAX_NUM_SEQS:-8}
+      - --max-model-len=${MAX_MODEL_LEN:-200000}
+      - --gpu-memory-utilization=${GPU_UTIL:-0.97}
+      # Prefill chunk size. 4096 measured +2.2% prefill at 16K context and +3.8% at 64K against
+      # 2560 on this box, lossless, at the cost of ~130 MiB of activation per card.
+      # The all-reduce message a prefill chunk sends is
+      # max-num-batched-tokens * hidden_size * 2 bytes, and a message over that cap silently falls
+      # back to RCCL, which measures 2.3x slower than the custom kernel at this size.
+      - --max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS:-4096}
+      - --kv-cache-dtype=fp8
+      - --attention-backend=ROCM_AITER_UNIFIED_ATTN
+      # Automatic prefix caching (APC) for shared prefixes (system prompts, RAG / agentic context).
+      # Both flags are required and ON here: this is a GDN hybrid, and hybrid models default their APC
+      # support flag off ("experimental"), so vLLM SILENTLY disables prefix caching unless
+      # --enable-prefix-caching is passed explicitly. --mamba-cache-mode=align makes the linear-attention
+      # (GDN) layers prefix-cacheable too, snapshotting + restoring their conv + recurrent state at block
+      # boundaries; this is verified bit-identical to full recompute (including under MTP). Effect:
+      # large TTFT drop on shared prefixes (~3.6x measured). Note: align reconciles the mamba/attention
+      # page sizes, which raises the attention block size to 1664 tokens and uses one extra state block
+      # per linear-attn layer (slightly lower max concurrency at full context). Remove both flags to
+      # disable. Do NOT use --mamba-cache-mode=all (unsupported by this model) and do NOT set
+      # VLLM_SSM_CONV_STATE_LAYOUT=DS (asserts under MTP + align).
+      - --enable-prefix-caching
+      - --mamba-cache-mode=align
+      # MTP self-speculation. nspec=8 default: RADIANCE dynamic-draft caps the actual MTP depth
+      # by confidence, so 8 is the ceiling not a fixed cost. nspec=16 is an option for more verbatim
+      # upside (editing/RAG) but needs GPU_UTIL=0.90 to stay safe at 8 concurrent sequences (else CUDA OOM).
+      - '--speculative-config={"method":"mtp","num_speculative_tokens":${MTP_NSPEC:-8},"attention_backend":"ROCM_AITER_UNIFIED_ATTN","disable_padded_drafter_batch":true}'
+      # CUDA-graph capture sizes. vLLM defaults to a ladder that runs to 144, but the largest decode
+      # batch this serve can ever reach is max_num_seqs * (num_speculative_tokens + 1) = 8 * 9 = 72,
+      # so every captured size above 72 is a graph that can never be replayed. Trimming the ladder
+      # gives that memory back to the KV cache and costs nothing at run time.
+      # KEEP IN SYNC: if MAX_NUM_SEQS or MTP_NSPEC changes, recompute the ceiling and this list.
+      # KV cache size in bytes. Strongly recommended: vLLM's memory profiler measures its own
+      # headroom through torch, which under-reports free VRAM, so auto-sizing silently leaves
+      # ~2-3 GiB per card unallocated, costing ~29% of KV capacity on an otherwise identical
+      # config. To derive the value for YOUR hardware and model:
+      #   1. start once with this line commented out
+      #   2. read the startup line "Actual usage is ... Current kv cache memory in use is N GiB"
+      #   3. read TRUE free VRAM from the driver, NOT from torch:
+      #        cat /sys/class/drm/card0/device/mem_info_vram_{used,total}
+      #      (a fresh python + torch process creates its own ~1.9 GiB HIP context and hides that much)
+      #   4. set this to (N + true_free - ~0.4 GiB of margin), in bytes
+      #   5. sample free VRAM repeatedly DURING an 8-stream run and during a large prefill, not once
+      #      after it: it keeps falling for ~40 s as the engine warms up, and a single early reading
+      #      overstates the margin badly. Aim to settle no lower than ~250 MiB.
+      # vLLM's own "to fully utilize gpu memory" suggestion is itself ~1 GiB short, for the same reason.
+      # Beware idle free VRAM: most of what the caching allocator holds reserved-but-unallocated gets
+      # reused under load, so it is not headroom. Raising the pin by the idle figure will not give you
+      # that much back -- size it by the real allocation you removed.
+      # This PINS the pool: while set, the KV size stops responding to other memory changes, so comment
+      # it out first whenever you measure anything memory-related.
+      # - --kv-cache-memory=15989735424   # 14.89 GiB, measured for Qwen3.8-27B-FP8 + TP2 on 2x R9700 32GB
+      #                                   # -> 660,336 KV tokens, 5.16x concurrency, 296 MiB free under
+      #                                   # load. Re-derive whenever max-num-batched-tokens changes.
+      - '--compilation-config={"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72]}'
+      # disable_padded_drafter_batch (above) is incompatible with async scheduling; vLLM would
+      # otherwise auto-enable async then disable it with a runtime warning. Turn it off explicitly.
+      - --no-async-scheduling
+      # agentic serving: XML tool calls + qwen3 reasoning + the fixed chat template
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      - --reasoning-parser=qwen3
+      - --chat-template=/work/qwen3.8-enhanced.jinja
+      - --language-model-only
+      - --trust-remote-code
+      - --host=0.0.0.0
+      - --port=8000
+    environment:
+      # GPU visibility: select your two R9700s by HIP index (exclude any iGPU). Never CUDA_VISIBLE_DEVICES.
+      HIP_VISIBLE_DEVICES: "0,1"
+      # AITER: unified attention ON, every other AITER path OFF (LINEAR=1 crashes on gfx1201).
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: "1"
+      VLLM_ROCM_USE_AITER_MHA: "0"
+      VLLM_ROCM_USE_AITER_MLA: "0"
+      VLLM_ROCM_USE_AITER_MOE: "0"
+      VLLM_ROCM_USE_AITER_LINEAR: "0"
+      VLLM_ROCM_USE_AITER_FP8BMM: "0"
+      VLLM_ROCM_USE_AITER_FP4BMM: "0"
+      VLLM_ROCM_USE_AITER_RMSNORM: "0"
+      # radiance rms+group-fp8-quant fusion coverage fix (also baked default 1; explicit here).
+      RADIANCE_FUSE_RMS_QUANT: "1"
+      # master switch for the hand-written gfx1201 kernel library: attention, the gated delta net,
+      # vision attention, the all-reduce and the skinny GEMM. Set "0" and every one of them reverts
+      # to the stock path (also drop --attention-backend=R4D above, which then refuses to start).
+      RADIANCE_USE_R4D: "${RADIANCE_USE_R4D:-1}"
+      # the P2P one-shot all-reduce itself; "0" keeps RCCL. Bit-identical to RCCL either way.
+      RADIANCE_USE_R4D_AR: "${RADIANCE_USE_R4D_AR:-1}"
+      # compressed all-reduce payload for large (prefill) messages; baked ON. Not bit-identical to RCCL;
+      # set "0" for the exact bf16 all-reduce.
+      RADIANCE_USE_R4D_AR_QUANT: "1"
+      # optional NUMA pinning of the vLLM fleet to the GPU-local node(s). Off by default (no-op on
+      # single-node hosts). Set "auto" to detect, or explicit nodes (e.g. "0" / "0,1"). Requires the
+      # SYS_NICE cap above. Equivalent to passing --numa-bind in command:.
+      RADIANCE_NUMA_BIND: "${RADIANCE_NUMA_BIND:-}"
+      # RADIANCE dynamic drafting (baked ON in the image; explicit here for visibility/overridability).
+      # Per-request MTP draft-depth control: a per-slot confidence gate picks the draft depth and takes
+      # free-win n-grams; the schedule caps serial MTP forwards by batch size. Set DYNAMIC_DRAFT="0" to
+      # disable (byte-identical stock MTP). The two knobs below are the only tunables.
+      RADIANCE_DYNAMIC_DRAFT: "1"
+      # Tuned on natural-language and code prompts; acceptance measured on synthetic random text
+      # is inflated and hides the effect. Capping the deep tail is worth +3.4% tok/s at one
+      # stream and +1.6% at eight, with lower time per step at both: the draft positions it
+      # removes run at ~5% marginal acceptance against a ~7% break-even. Removing the caps
+      # entirely ("1:8,2:8,4:8,8:8") measures -7.5% at eight streams, so they do bind.
+      RADIANCE_DRAFT_SCHEDULE: "${RADIANCE_DRAFT_SCHEDULE:-1:8,2:7,4:6,8:5,16:4}"
+      RADIANCE_DRAFT_TAU: "${RADIANCE_DRAFT_TAU:-0.28}"
+      # The tuned drafter stack, as one switch: the draft head at 2 bits with an exact rerank
+      # (+16.6% tokens/s single-stream, +12.5% at eight, acceptance unchanged, and it matches the
+      # exact bf16 argmax on every one of 8192 real draft inputs), and -- on a dflash drafter,
+      # which this MTP configuration is not -- its weights at 4 bits. Opt-in because it is a
+      # larger change than a tuning knob.
+      # ON by default, and the DRAFT_TAU above is the matching value: 0.28 is what was tuned FOR
+      # the 2-bit head, because a cheaper draft step lowers the marginal acceptance a draft
+      # position has to clear. If you set FAST_DRAFT="0" to get the stock bf16 head back, set
+      # DRAFT_TAU="0.35" with it -- that is the measured value there, and leaving them crossed
+      # drafts deeper than the expensive head pays for.
+      # MUST be declared here to be settable: compose only forwards declared vars.
+      RADIANCE_FAST_DRAFT: "${RADIANCE_FAST_DRAFT:-1}"
+      NCCL_PROTO: Simple
+      # throttle inductor compile workers to limit peak compile-time RAM (defensive).
+      TORCHINDUCTOR_COMPILE_THREADS: "4"
+      # persistent compile caches -> fast warm restarts (a cold cache spends a few extra minutes
+      # compiling Triton/inductor kernels before the engine comes up). Mounted below.
+      VLLM_CACHE_ROOT: /cache/vllm
+      TORCHINDUCTOR_CACHE_DIR: /cache/inductor
+      TRITON_CACHE_DIR: /cache/triton
+      AITER_ROOT_DIR: /cache/aiter
+      TRITON_CACHE_AUTOTUNING: "1"
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:                # GPU access: set to YOUR host's GIDs:
+      - "RENDER_GID"          #   getent group render | cut -d: -f3
+      - "VIDEO_GID"           #   getent group video  | cut -d: -f3
+    cap_add:
+      - SYS_PTRACE            # py-spy
+      - SYS_NICE              # numactl mempolicy syscalls (only needed if you enable RADIANCE_NUMA_BIND)
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    ports:
+      - "8000:8000"
+    volumes:
+      # override any of these via the shell or a .env file (e.g. MODELS=/data/models)
+      - ${MODELS:-./models}:/models:ro           # holds your model at Qwen/Qwen3.8-27B-FP8 (matches command: below)
+      - ${VLLM_CACHE:-./vllm-cache}:/cache        # torch.compile / aiter JIT cache, persist across restarts
+      - ${WORK:-.}:/work:ro                        # supplies /work/qwen3.8-enhanced.jinja (this repo directory)
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 60
+      start_period: 1800s     # generous: a cold cache compiles kernels before the engine comes up,
+                              # and a long --max-model-len adds graph-capture time
