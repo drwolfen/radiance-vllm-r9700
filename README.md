@@ -66,11 +66,11 @@ docker build -t radiance-vllm:0.10.0 --build-arg RADIANCE_VERSION=0.10.0 .
 Download the target model from Hugging Face onto your host filesystem:
 
 ```bash
-# Install Hugging Face Hub CLI if needed
-pip install -U huggingface_hub
+# Install modern Hugging Face Hub CLI (hf)
+pip install -U "huggingface_hub[cli]"
 
-# Download Ornith-1.5-35B-A3B-FP8 (approx. 37 GB)
-huggingface-cli download ornith-ai/Ornith-1.5-35B-A3B-FP8 --local-dir /home/ydj/LLM-Models/Ornith-1.5-35B-A3B-FP8
+# Download Ornith-1.5-35B-A3B-FP8 (approx. 37 GB) via modern hf CLI
+hf download ornith-ai/Ornith-1.5-35B-A3B-FP8 --local-dir /path/to/Ornith-1.5-35B-A3B-FP8
 ```
 
 ---
