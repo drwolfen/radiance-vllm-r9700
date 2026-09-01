@@ -54,7 +54,7 @@ RUN mkdir -p /wheels
 RUN git clone --depth 1 -b v${TORCH_VERSION} --recurse-submodules --shallow-submodules \
         https://github.com/pytorch/pytorch.git /src/pytorch \
     && cd /src/pytorch \
-    && sed -i '/symm_mem/d' caffe2/CMakeLists.txt build_variables.bzl \
+    && sed -i '/NCCLSymmetricMemory/d; /nccl_extension/d; /nccl_reduce_scatter_offset/d' build_variables.bzl caffe2/CMakeLists.txt \
     && pip install -r requirements.txt \
     && python tools/amd_build/build_amd.py \
     && USE_MAGMA=0 USE_MKLDNN=1 BUILD_TEST=0 USE_NCCL=1 USE_RCCL=1 \
