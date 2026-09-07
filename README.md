@@ -86,7 +86,7 @@ docker run -d \
   --device=/dev/kfd --device=/dev/dri --group-add video \
   --ipc=host \
   -p 8000:8000 \
-  -v ${MODEL_DIR:-${HOME}/LLM-Models/Ornith-1.5-35B-A3B-FP8}:/models/ornith:ro \
+  -v ${MODEL_DIR:-/path/to/Ornith-1.5-35B-A3B-FP8}:/models/ornith:ro \
   -v ./chat_template_ornith.jinja:/work/chat_template.jinja:ro \
   -e HIP_VISIBLE_DEVICES=0,1 \
   -e VLLM_ROCM_USE_AITER=1 \
