@@ -5,7 +5,7 @@
 [![ROCm: 7.14.0 / 7.2.4](https://img.shields.io/badge/ROCm-7.14.0%20%2F%207.2.4-blue.svg)]()
 [![vLLM: 0.28.0](https://img.shields.io/badge/vLLM-0.28.0-orange.svg)]()
 [![PyTorch: 2.12.1+rocm7.14](https://img.shields.io/badge/PyTorch-2.12.1%2Brocm7.14-red.svg)]()
-[![Release: v0.10.0](https://img.shields.io/badge/Release-v0.10.0-green.svg)](https://github.com/drwolfen/radiance-vllm-r9700/releases/tag/v0.10.0)
+[![Release: v0.11.0](https://img.shields.io/badge/Release-v0.11.0-green.svg)](https://github.com/drwolfen/radiance-vllm-r9700/releases/tag/v0.11.0)
 
 An optimized, production-grade vLLM inference server specifically engineered for **Dual AMD Radeon AI PRO R9700 GPUs (`gfx1201 / RDNA4`)** running in Tensor Parallel (`TP=2`).
 
@@ -299,6 +299,21 @@ On dual 32 GiB R9700 cards (64 GiB total pool), memory allocation behaves as fol
 
 ---
 
+## 🌐 Production Cluster Topology
+
+This repository targets a multi-node RDNA4 cluster. Nodes and their current roles:
+
+| Node | IP | Port | Role | Model / Service |
+| :--- | :---: | :---: | :--- | :--- |
+| **srv02** (primary) | `.244` | `8000` | **local-heavy** — main LLM inference | `Qwen3.8-Flash-Next` (R9V, TP=2) |
+| **srv01** | `.246` | `8090` | **local-light** — fast routing & agents | `Qwythos-9B-v2-MTP-Q6_K` (llama.cpp MTP) |
+| **workstation** | `.150` | `8188` | **ComfyUI** — image generation (SDXL / FLUX) | ROCm, RX 9070 XT (`gfx1201`) |
+
+> **Note**: The workstation's llama.cpp endpoint (`.150:8083`, `Qwen3-14B`) is **stopped and removed** — the node is now exclusively dedicated to ComfyUI image generation.
+> For multi-tier status and throughput verification, run `python3 tests/bench_other_tiers.py`.
+
+---
+
 ## 🛠️ Verification Gates Architecture
 
 Every build stage is validated through standalone automated test gates:
@@ -317,8 +332,13 @@ python3 tests/test_patch_ast.py
 python3 tests/test_micro_kernels.py
 python3 tests/test_mxfp4_layer.py
 
-# Gate 5: Run extended serving benchmark suite
+# Gate 5: Run extended serving benchmark suite against local-heavy (primary)
 python3 tests/vllm_benchmark_suite.py --url http://localhost:8000/v1/chat/completions
+
+# Gate 6: Verify multi-tier cluster endpoints — tool calling & throughput
+# Tests local-heavy (.244:8000) and local-light (.246:8090).
+# local-medium (.150:8083) is marked inactive (workstation dedicated to ComfyUI image-gen on :8188).
+python3 tests/bench_other_tiers.py
 ```
 
 ---
@@ -393,8 +413,9 @@ When starting the container or compiling graphs, you will observe specific log l
 
 ## 🤖 AI Synthesis & Engineering Attribution
 
-- **Implementation Plan**: Designed and synthesized using **Gemini Flash 3.7 (High)** and **GLM-5.2**.
-- **Execution & Automated Porting**: Implemented, built, verified, and benchmarked by **Gemini Flash 3.7 (High)**.
+- **Initial Implementation Plan (v0.10.0)**: Designed and synthesized using **Gemini Flash 3.7 (High)** and **GLM-5.2**.
+- **Execution & Automated Porting (v0.10.0)**: Implemented, built, verified, and benchmarked by **Gemini Flash 3.7 (High)**.
+- **Cluster topology, multi-tier benchmarking & v0.11.0 updates**: Designed and implemented using **Gemini 3.8 Flash** and **Claude Sonnet 4.6**.
 
 ---
 
